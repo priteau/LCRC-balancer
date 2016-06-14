@@ -90,15 +90,32 @@ def get_nodes():
 def get_jobs():
     return jsonify({'jobs': jobs})
 
+def get_short_hostname(hostname):
+    try:
+        i = hostname.index(".")
+        return hostname[:i]
+    except ValueError:
+        return hostname
+
 @app.route('/jobs/prologue', methods=['POST'])
 def prologue():
     if not request.json:
         abort(400)
     job = request.get_json()
     job_id = job['job_id']
+    job['hostname'] = get_short_hostname(job['hostname'])
     jobs[job_id] = job
+    print(job)
 
-    nodes[job['hostname']]['torque_state'] = 'job-exclusive'
+    # If any of the nodes Torque tries to run on is not free,
+    # it must mean that OpenStack got to them in the meantime.
+    # Return a 403 which will requeue the job
+    for node in job['node_list']:
+        if nodes[node]['torque_state'] != 'free':
+            abort(403)
+
+    for node in job['node_list']:
+        nodes[node]['torque_state'] = 'job-exclusive'
 
     #print jobs[job_id]
     #print nodes
@@ -109,7 +126,9 @@ def epilogue():
     if not request.json:
         abort(400)
     job = request.get_json()
+    job['hostname'] = get_short_hostname(job['hostname'])
     job_id = job['job_id']
+    print(job)
 
     existing_job = jobs.get(job_id, None)
     if existing_job is None:
@@ -118,7 +137,9 @@ def epilogue():
         existing_job.update(job)
         jobs[job_id] = existing_job
 
-    nodes[job['hostname']]['torque_state'] = 'free'
+    for node in job['node_list']:
+      if nodes[node]['torque_state'] == 'job-exclusive':
+          nodes[node]['torque_state'] = 'free'
 
     #print jobs[job_id]
     #print nodes
