@@ -3,6 +3,8 @@
 from datetime import datetime
 import json
 import os
+import time
+from threading import Lock
 
 from flask import abort, Flask, jsonify, request
 
@@ -16,12 +18,69 @@ ON_DEMAND_RESERVE_SIZE = 1
 jobs = {
 }
 
+lock = Lock()
 nodes = {
     'lcrc-worker-1': {
         'openstack_state': 'unavailable',
         'torque_state': 'free'
     },
     'lcrc-worker-2': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-3': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-4': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-5': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-6': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-7': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-8': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-9': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-10': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-11': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-12': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-13': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-14': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-15': {
+        'openstack_state': 'unavailable',
+        'torque_state': 'free'
+    },
+    'lcrc-worker-16': {
         'openstack_state': 'unavailable',
         'torque_state': 'free'
     }
@@ -68,13 +127,23 @@ def execute():
 def request_nodes(count):
     count = int(count)
     result = {}
-    for node in nodes:
+    loop = 0
+    while loop < 30:
+        lock.acquire()
+        for node in nodes:
+            if len(result) == count:
+                break
+            if nodes[node]['torque_state'] == 'free':
+                nodes[node]['torque_state'] = 'offline'
+                nodes[node]['openstack_state'] = 'available'
+                result[node] = nodes[node]
+        lock.release()
         if len(result) == count:
+            print "request_nodes() found enough resource after {}s wait!".format(loop)
             break
-        if nodes[node]['torque_state'] == 'free':
-            nodes[node]['torque_state'] == 'offline'
-            nodes[node]['openstack_state'] == 'available'
-            result[node] = nodes[node]
+        loop += 1
+        print "request_nodes() couldn't find enough node after {} attempt, sleep 1s".format(loop)
+        time.sleep(1)
 
     # Disable host in Torque
     for node in result:
@@ -174,4 +243,4 @@ def end_job(job_id):
     return jsonify(jobs[job_id])
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=1234, debug=True)
+    app.run(host='0.0.0.0', port=1234, debug=True, threaded=True)
