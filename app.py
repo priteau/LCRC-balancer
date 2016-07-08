@@ -5,6 +5,8 @@ import json
 import os
 import time
 from threading import Lock
+import Queue
+import threading
 
 from flask import abort, Flask, jsonify, request
 
@@ -19,6 +21,8 @@ jobs = {
 }
 
 lock = Lock()
+request_queue = Queue.Queue()
+available_count = 0
 nodes = {
     'lcrc-worker-1': {
         'openstack_state': 'unavailable',
@@ -127,9 +131,21 @@ def execute():
 def request_nodes(count):
     count = int(count)
     result = {}
-    loop = 0
-    while loop < 30:
-        lock.acquire()
+    queue_flag = False
+    lock.acquire()
+    global available_count
+    if not request_queue.empty() or available_count == 0:
+        newEvent = threading.Event()
+        request_queue.put(newEvent)
+        queue_flag = True
+    lock.release()
+    if queue_flag:
+        newEvent.wait(timeout=30)
+        if not newEvent.is_set():
+            # timeout
+            return jsonify({'nodes': result})
+    lock.acquire()
+    if available_count > 0:
         for node in nodes:
             if len(result) == count:
                 break
@@ -137,13 +153,8 @@ def request_nodes(count):
                 nodes[node]['torque_state'] = 'offline'
                 nodes[node]['openstack_state'] = 'available'
                 result[node] = nodes[node]
-        lock.release()
-        if len(result) == count:
-            print "request_nodes() found enough resource after {}s wait!".format(loop)
-            break
-        loop += 1
-        print "request_nodes() couldn't find enough node after {} attempt, sleep 1s".format(loop)
-        time.sleep(1)
+        available_count -= len(result)
+    lock.release()
 
     # Disable host in Torque
     for node in result:
@@ -210,6 +221,12 @@ def epilogue():
       if nodes[node]['torque_state'] == 'job-exclusive':
           nodes[node]['torque_state'] = 'free'
 
+    lock.acquire()
+    global available_count
+    available_count += 1
+    if not request_queue.empty():
+        request_queue.get().set()
+    lock.release()
     #print jobs[job_id]
     #print nodes
     return jsonify(job)
