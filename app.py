@@ -20,9 +20,9 @@ ON_DEMAND_RESERVE_SIZE = 1
 jobs = {
 }
 
+debug_task_id = 1
 lock = Lock()
 request_queue = Queue.Queue()
-available_count = 0
 nodes = {
     'lcrc-worker-1': {
         'openstack_state': 'unavailable',
@@ -89,6 +89,7 @@ nodes = {
         'torque_state': 'free'
     }
 }
+available_count = len(nodes)
 
 def enable_host(**kwargs):
     host = kwargs.get("host")
@@ -96,8 +97,13 @@ def enable_host(**kwargs):
         print "Enabling host %s" % host
         cmd = "sudo pbsnodes -c %s" % host
         os.system(cmd)
+    lock.acquire()
+    global available_count
+    available_count += 1
     nodes[host]['torque_state'] = 'free'
     nodes[host]['openstack_state'] = 'unavailable'
+    print "enable_host available_count =", available_count
+    lock.release()
 
 def disable_host(**kwargs):
     host = kwargs.get("host")
@@ -133,18 +139,30 @@ def request_nodes(count):
     result = {}
     queue_flag = False
     lock.acquire()
-    global available_count
+    global available_count, debug_task_id
+    _debug_task_id = debug_task_id
+    debug_task_id += 1
+    lock.release()
+    lock.acquire()
+    print "request_nodes() available_count =", available_count
     if not request_queue.empty() or available_count == 0:
+        print "QUEUE a request", _debug_task_id
         newEvent = threading.Event()
         request_queue.put(newEvent)
         queue_flag = True
     lock.release()
     if queue_flag:
         newEvent.wait(timeout=30)
+        lock.acquire()
         if not newEvent.is_set():
-            # timeout
+            request_queue.get()
+            print _debug_task_id, "W TIMEOUT available_count =", available_count
+            lock.release()
             return jsonify({'nodes': result})
+        else:
+            lock.release()
     lock.acquire()
+    print _debug_task_id, "SUCCESS available_count = {}".format(available_count)
     if available_count > 0:
         for node in nodes:
             if len(result) == count:
@@ -154,12 +172,17 @@ def request_nodes(count):
                 nodes[node]['openstack_state'] = 'available'
                 result[node] = nodes[node]
         available_count -= len(result)
+        print _debug_task_id, "LEFT available_count = {}".format(available_count)
     lock.release()
 
     # Disable host in Torque
     for node in result:
         kwargs = {'host': node}
         disable_host(**kwargs)
+    if len(result):
+        print _debug_task_id, "FOUND node"
+    else:
+        print _debug_task_id, "REJECT"
     return jsonify({'nodes': result})
 
 @app.route('/nodes', methods=['GET'])
@@ -192,10 +215,18 @@ def prologue():
     # Return a 403 which will requeue the job
     for node in job['node_list']:
         if nodes[node]['torque_state'] != 'free':
+            print "ABORT 403"
             abort(403)
 
+    lock.acquire()
+    taken_node = 0
     for node in job['node_list']:
         nodes[node]['torque_state'] = 'job-exclusive'
+        taken_node += 1
+    global available_count
+    available_count -= taken_node
+    print "prologue took", taken_node, "available_count =", available_count
+    lock.release()
 
     #print jobs[job_id]
     #print nodes
@@ -217,15 +248,23 @@ def epilogue():
         existing_job.update(job)
         jobs[job_id] = existing_job
 
+    global available_count
+    released_node = 0
     for node in job['node_list']:
       if nodes[node]['torque_state'] == 'job-exclusive':
           nodes[node]['torque_state'] = 'free'
+          released_node += 1
+    print "RELEASE", released_node
 
     lock.acquire()
-    global available_count
-    available_count += 1
-    if not request_queue.empty():
-        request_queue.get().set()
+    available_count += released_node
+    print "epilogue available_count =", available_count
+    while released_node > 0:
+        if not request_queue.empty():
+            request_queue.get().set()
+            released_node -= 1
+        else:
+            break
     lock.release()
     #print jobs[job_id]
     #print nodes
