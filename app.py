@@ -5,27 +5,38 @@ import json
 import os
 
 from flask import abort, Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/lcrc.db'
+db = SQLAlchemy(app)
 
-JOB_STATUSES = (QUEUED, STARTED, ENDED
-            ) = ('QUEUED', 'STARTED', 'ENDED')
+
+class Node(db.Model):
+    __tablename__ = 'nodes'
+    hostname = db.Column(db.String(255), primary_key=True)
+    openstack_state = db.Column(db.String(64))
+    torque_state = db.Column(db.String(64))
+
+    def __init__(self, hostname, openstack_state='unavailable',
+                 torque_state='free'):
+        self.hostname = hostname
+        self.openstack_state = openstack_state
+        self.torque_state = torque_state
+
+    def __repr__(self):
+        return '<Node %r>' % self.hostname
+
+    def to_dict(self):
+        return {'hostname': self.hostname,
+                'openstack_state': self.openstack_state,
+                'torque_state': self.torque_state}
 
 ON_DEMAND_RESERVE_SIZE = 1
 
 jobs = {
 }
 
-nodes = {
-    'lcrc-worker-1': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-2': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    }
-}
 
 def enable_host(**kwargs):
     host = kwargs.get("host")
@@ -33,8 +44,11 @@ def enable_host(**kwargs):
         print "Enabling host %s" % host
         cmd = "sudo pbsnodes -c %s" % host
         os.system(cmd)
-    nodes[host]['torque_state'] = 'free'
-    nodes[host]['openstack_state'] = 'unavailable'
+    node = Node.query.filter_by(hostname=host).first()
+    node.torque_state = 'free'
+    node.openstack_state = 'unavailable'
+    db.session.commit()
+
 
 def disable_host(**kwargs):
     host = kwargs.get("host")
@@ -42,8 +56,11 @@ def disable_host(**kwargs):
         print "Disabling host %s" % host
         cmd = "sudo pbsnodes -o %s" % host
         os.system(cmd)
-    nodes[host]['torque_state'] = 'offline'
-    nodes[host]['openstack_state'] = 'available'
+    node = Node.query.filter_by(hostname=host).first()
+    node.torque_state = 'offline'
+    node.openstack_state = 'available'
+    db.session.commit()
+
 
 @app.route('/execute', methods=['POST'])
 def execute():
@@ -68,13 +85,13 @@ def execute():
 def request_nodes(count):
     count = int(count)
     result = {}
-    for node in nodes:
+    for node in Node.query.all():
         if len(result) == count:
             break
-        if nodes[node]['torque_state'] == 'free':
-            nodes[node]['torque_state'] == 'offline'
-            nodes[node]['openstack_state'] == 'available'
-            result[node] = nodes[node]
+        if node.torque_state == 'free':
+            node.torque_state = 'offline'
+            node.openstack_state = 'available'
+            result[node.hostname] = node.to_dict()
 
     # Disable host in Torque
     for node in result:
@@ -82,13 +99,19 @@ def request_nodes(count):
         disable_host(**kwargs)
     return jsonify({'nodes': result})
 
+
 @app.route('/nodes', methods=['GET'])
 def get_nodes():
+    nodes = {}
+    for n in Node.query.all():
+        nodes[n.hostname] = n.to_dict()
     return jsonify({'nodes': nodes})
+
 
 @app.route('/jobs', methods=['GET'])
 def get_jobs():
     return jsonify({'jobs': jobs})
+
 
 def get_short_hostname(hostname):
     try:
@@ -96,6 +119,7 @@ def get_short_hostname(hostname):
         return hostname[:i]
     except ValueError:
         return hostname
+
 
 @app.route('/jobs/prologue', methods=['POST'])
 def prologue():
@@ -111,15 +135,17 @@ def prologue():
     # it must mean that OpenStack got to them in the meantime.
     # Return a 403 which will requeue the job
     for node in job['node_list']:
-        if nodes[node]['torque_state'] != 'free':
+        db_node = Node.query.filter_by(hostname=node).first()
+        if db_node.torque_state != 'free':
             abort(403)
 
     for node in job['node_list']:
-        nodes[node]['torque_state'] = 'job-exclusive'
+        db_node = Node.query.filter_by(hostname=node).first()
+        db_node.torque_state = 'job-exclusive'
+        db.session.commit()
 
-    #print jobs[job_id]
-    #print nodes
     return jsonify(job)
+
 
 @app.route('/jobs/epilogue', methods=['POST'])
 def epilogue():
@@ -138,16 +164,17 @@ def epilogue():
         jobs[job_id] = existing_job
 
     for node in job['node_list']:
-      if nodes[node]['torque_state'] == 'job-exclusive':
-          nodes[node]['torque_state'] = 'free'
+        db_node = Node.query.filter_by(hostname=node).first()
+        if db_node.torque_state == 'job-exclusive':
+            db_node.torque_state = 'free'
 
-    #print jobs[job_id]
-    #print nodes
     return jsonify(job)
+
 
 def _create_job_if_not_exists(job_id):
     if job_id not in jobs:
-        jobs[job_id] = { 'id': job_id }
+        jobs[job_id] = {'id': job_id}
+
 
 @app.route('/jobs/<job_id>/queue', methods=['POST'])
 def queue_job(job_id):
@@ -157,6 +184,7 @@ def queue_job(job_id):
     jobs[job_id]['queued_time'] = datetime.utcnow()
     return jsonify(jobs[job_id])
 
+
 @app.route('/jobs/<job_id>/start', methods=['POST'])
 def start_job(job_id):
     # store a start event for this job
@@ -164,6 +192,7 @@ def start_job(job_id):
     jobs[job_id]['status'] = 'STARTED'
     jobs[job_id]['start_time'] = datetime.utcnow()
     return jsonify(jobs[job_id])
+
 
 @app.route('/jobs/<job_id>/end', methods=['POST'])
 def end_job(job_id):
