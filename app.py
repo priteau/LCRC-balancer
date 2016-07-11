@@ -136,13 +136,15 @@ def execute():
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
     count = int(count)
-    result = {}
-    queue_flag = False
+
     lock.acquire()
     global available_count, debug_task_id
     _debug_task_id = debug_task_id
     debug_task_id += 1
     lock.release()
+    new_nodes = {}
+
+    queue_flag = False
     lock.acquire()
     print "request_nodes() available_count =", available_count
     if not request_queue.empty() or available_count == 0:
@@ -151,39 +153,48 @@ def request_nodes(count):
         request_queue.put(newEvent)
         queue_flag = True
     lock.release()
+
     if queue_flag:
         newEvent.wait(timeout=30)
         lock.acquire()
-        if not newEvent.is_set():
+        if not newEvent.is_set(): # no nodes were released before timeout
             request_queue.get()
             print _debug_task_id, "W TIMEOUT available_count =", available_count
             lock.release()
-            return jsonify({'nodes': result})
+            # Race condition: new node might suddenly become available
+            # after lock is being released. This is not a problem because
+            # in this condition, on the NOVA scheduler side, conflicts
+            # will be solved eventually when multiple instances try to
+            # launch on the same node: only the first request will be
+            # successful, all the others will fail due to no enough resource
+            # left.
+            return jsonify({'nodes': nodes})
         else:
             lock.release()
+
     lock.acquire()
     print _debug_task_id, "SUCCESS available_count = {}".format(available_count)
     if available_count > 0:
         for node in nodes:
-            if len(result) == count:
+            if len(new_nodes) == count:
                 break
             if nodes[node]['torque_state'] == 'free':
                 nodes[node]['torque_state'] = 'offline'
                 nodes[node]['openstack_state'] = 'available'
-                result[node] = nodes[node]
-        available_count -= len(result)
+                new_nodes[node] = nodes[node]
+        available_count -= len(new_nodes)
         print _debug_task_id, "LEFT available_count = {}".format(available_count)
     lock.release()
 
     # Disable host in Torque
-    for node in result:
+    for node in new_nodes:
         kwargs = {'host': node}
         disable_host(**kwargs)
-    if len(result):
+    if len(new_nodes):
         print _debug_task_id, "FOUND node"
     else:
         print _debug_task_id, "REJECT"
-    return jsonify({'nodes': result})
+    return jsonify({'nodes': nodes})
 
 @app.route('/nodes', methods=['GET'])
 def get_nodes():
