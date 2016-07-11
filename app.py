@@ -92,6 +92,11 @@ nodes = {
 available_count = len(nodes)
 
 def enable_host(**kwargs):
+    # TODO check request_queue, leap-frog lease
+    # Issue: instance cleanup is not done, schedule
+    # would fail due to lack of resource
+    # Fix: in request_nodes, when timeout, don't return
+    # right away, check nodes status again
     host = kwargs.get("host")
     if host is not None:
         print "Enabling host %s" % host
@@ -168,7 +173,10 @@ def request_nodes(count):
             # launch on the same node: only the first request will be
             # successful, all the others will fail due to no enough resource
             # left.
-            return jsonify({'nodes': nodes})
+            # return jsonify({'nodes': nodes})
+            # give it one more chance, since another instance might quit
+            # during W
+            pass
         else:
             lock.release()
 
