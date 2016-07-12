@@ -20,7 +20,7 @@ ON_DEMAND_RESERVE_SIZE = 1
 jobs = {
 }
 
-debug_task_id = 1
+request_id = 1
 lock = Lock()
 request_queue = Queue.Queue()
 nodes = {
@@ -97,13 +97,13 @@ def enable_host(**kwargs):
     # would fail due to lack of resource
     # Fix: in request_nodes, when timeout, don't return
     # right away, check nodes status again
+    global available_count
     host = kwargs.get("host")
     if host is not None:
         print "Enabling host %s" % host
         cmd = "sudo pbsnodes -c %s" % host
         os.system(cmd)
     lock.acquire()
-    global available_count
     available_count += 1
     nodes[host]['torque_state'] = 'free'
     nodes[host]['openstack_state'] = 'unavailable'
@@ -141,68 +141,54 @@ def execute():
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
     count = int(count)
+    if count <= 0:
+        return jsonify({'nodes': {}})
 
-    lock.acquire()
-    global available_count, debug_task_id
-    _debug_task_id = debug_task_id
-    debug_task_id += 1
-    lock.release()
+    global available_count, request_id
     new_nodes = {}
 
-    queue_flag = False
     lock.acquire()
-    print "request_nodes() available_count =", available_count
+    _request_id = request_id
+    request_id += 1
+    print datetime.utcnow(), _request_id, "request_nodes starting available_count =", available_count
     if not request_queue.empty() or available_count == 0:
-        print "QUEUE a request", _debug_task_id
+        print datetime.utcnow(), "QUEUE request", _request_id
         newEvent = threading.Event()
         request_queue.put(newEvent)
-        queue_flag = True
-    lock.release()
-
-    if queue_flag:
-        newEvent.wait(timeout=30)
+        lock.release()
+        newEvent.wait(timeout=30) # TODO W live configurable
         lock.acquire()
-        if not newEvent.is_set(): # no nodes were released before timeout
+        if not newEvent.is_set():
+            # W timeout
             request_queue.get()
-            print _debug_task_id, "W TIMEOUT available_count =", available_count
             lock.release()
-            # Race condition: new node might suddenly become available
-            # after lock is being released. This is not a problem because
-            # in this condition, on the NOVA scheduler side, conflicts
-            # will be solved eventually when multiple instances try to
-            # launch on the same node: only the first request will be
-            # successful, all the others will fail due to no enough resource
-            # left.
-            # return jsonify({'nodes': nodes})
-            # give it one more chance, since another instance might quit
-            # during W
-            pass
+            print datetime.utcnow(), _request_id, "request_nodes W TIMEOUT available_count =", available_count
+            return jsonify({'nodes': new_nodes})
         else:
-            lock.release()
+            print datetime.utcnow(), _request_id, "request_nodes W SUCCESS available_count =", available_count
 
-    lock.acquire()
-    print _debug_task_id, "SUCCESS available_count = {}".format(available_count)
     if available_count > 0:
         for node in nodes:
-            if len(new_nodes) == count:
-                break
             if nodes[node]['torque_state'] == 'free':
                 nodes[node]['torque_state'] = 'offline'
                 nodes[node]['openstack_state'] = 'available'
                 new_nodes[node] = nodes[node]
+                if len(new_nodes) == count:
+                    break
+        # TODO what about len(new_nodes) < count
         available_count -= len(new_nodes)
-        print _debug_task_id, "LEFT available_count = {}".format(available_count)
+    print datetime.utcnow(), _request_id, "request_nodes remaining available_count = ", available_count
     lock.release()
 
     # Disable host in Torque
     for node in new_nodes:
         kwargs = {'host': node}
         disable_host(**kwargs)
-    if len(new_nodes):
-        print _debug_task_id, "FOUND node"
+    if len(new_nodes) == count:
+        print datetime.utcnow(), _request_id, "request_nodes SUCCESS"
     else:
-        print _debug_task_id, "REJECT"
-    return jsonify({'nodes': nodes})
+        print datetime.utcnow(), _request_id, "request_nodes REJECT"
+    return jsonify({'nodes': new_nodes})
 
 @app.route('/nodes', methods=['GET'])
 def get_nodes():
