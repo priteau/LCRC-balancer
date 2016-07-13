@@ -92,11 +92,13 @@ nodes = {
 available_count = len(nodes)
 
 def clear_exiting_flag(host):
+    global available_count
     try:
         if nodes[host]['openstack_state'] == 'exiting':
             nodes[host]['openstack_state'] = 'available'
             lock.acquire()
             available_count += 1
+            print "clear_exiting_flag available_count =", available_count
             lock.release()
     except Exception as e:
         print e
