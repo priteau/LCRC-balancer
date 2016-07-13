@@ -91,6 +91,16 @@ nodes = {
 }
 available_count = len(nodes)
 
+def clear_exiting_flag(host):
+    try:
+        if nodes[host]['openstack_state'] == 'exiting':
+            nodes[host]['openstack_state'] = 'available'
+            lock.acquire()
+            available_count += 1
+            lock.release()
+    except Exception as e:
+        print e
+
 def enable_host(**kwargs):
     # TODO check request_queue, leap-frog lease
     # Issue: instance cleanup is not done, schedule
@@ -104,11 +114,13 @@ def enable_host(**kwargs):
         cmd = "sudo pbsnodes -c %s" % host
         os.system(cmd)
     lock.acquire()
-    available_count += 1
     nodes[host]['torque_state'] = 'free'
-    nodes[host]['openstack_state'] = 'unavailable'
+    nodes[host]['openstack_state'] = 'exiting'
     print "enable_host available_count =", available_count
     lock.release()
+    # give worker node 10 seconds to update resource usage
+    t = threading.Timer(10, args=[host])
+    t.start()
 
 def disable_host(**kwargs):
     host = kwargs.get("host")
@@ -129,7 +141,7 @@ def unlock_hosts(**kwargs):
                 print "ERROR unlock_host nodes[{}]['openstack_state'] = {}".format(
                         host, nodes[host]['openstack_state'])
     except Exception as e:
-        print str(e)
+        print e
 
 @app.route('/execute', methods=['POST'])
 def execute():
@@ -183,7 +195,7 @@ def request_nodes(count):
     if available_count > 0:
         for node in nodes:
             if nodes[node]['torque_state'] == 'free':
-                if nodes[node]['openstack_state'] == 'lock':
+                if nodes[node]['openstack_state'] in ['lock', 'exiting']:
                     continue
                 nodes[node]['torque_state'] = 'offline'
                 nodes[node]['openstack_state'] = 'lock'
@@ -222,6 +234,7 @@ def get_short_hostname(hostname):
 
 @app.route('/jobs/prologue', methods=['POST'])
 def prologue():
+    global available_count
     if not request.json:
         abort(400)
     job = request.get_json()
@@ -243,8 +256,8 @@ def prologue():
     for node in job['node_list']:
         nodes[node]['torque_state'] = 'job-exclusive'
         taken_node += 1
-    global available_count
-    available_count -= taken_node
+        if nodes[node]['openstack_state'] != 'exiting':
+            available_count -= 1
     print "prologue took", taken_node, "available_count =", available_count
     lock.release()
 
@@ -270,14 +283,17 @@ def epilogue():
 
     global available_count
     released_node = 0
+    nonexiting_avail_node = 0
     for node in job['node_list']:
-      if nodes[node]['torque_state'] == 'job-exclusive':
-          nodes[node]['torque_state'] = 'free'
-          released_node += 1
+        if nodes[node]['torque_state'] == 'job-exclusive':
+            nodes[node]['torque_state'] = 'free'
+            released_node += 1
+            if nodes[node]['openstack_state'] != 'exiting':
+                nonexiting_avail_node += 1
     print "RELEASE", released_node
 
     lock.acquire()
-    available_count += released_node
+    available_count += nonexiting_avail_node
     print "epilogue available_count =", available_count
     while released_node > 0:
         if not request_queue.empty():
