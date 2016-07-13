@@ -90,51 +90,61 @@ nodes = {
     }
 }
 available_count = len(nodes)
+leapfrog_count = 0
 
 def clear_exiting_flag(host):
-    global available_count
+    global available_count, leapfrog_count
     try:
         if nodes[host]['openstack_state'] == 'exiting':
-            nodes[host]['openstack_state'] = 'available'
             lock.acquire()
-            available_count += 1
-            print "clear_exiting_flag available_count =", available_count
-            lock.release()
+            if request_queue.empty():
+                lock.release()
+                print "Enabling host %s" % host
+                cmd = "sudo pbsnodes -c %s" % host
+                os.system(cmd)
+                lock.acquire()
+                nodes[host]['torque_state'] = 'free'
+                nodes[host]['openstack_state'] = 'unavailable'
+                available_count += 1
+                print "clear_exiting_flag no waiting request, available_count =", available_count
+                lock.release()
+            else:
+                nodes[host]['openstack_state'] = 'leapfrog'
+                leapfrog_count += 1
+                print "clear_exiting_flag leapfrog, leapfrog_count =", leapfrog_count
+                request_queue.get().set()
+                lock.release()
     except Exception as e:
         print e
 
 def enable_host(**kwargs):
-    # TODO check request_queue, leap-frog lease
-    # Issue: instance cleanup is not done, schedule
-    # would fail due to lack of resource
-    # Fix: in request_nodes, when timeout, don't return
-    # right away, check nodes status again
-    global available_count
-    host = kwargs.get("host")
-    if host is not None:
-        print "Enabling host %s" % host
-        cmd = "sudo pbsnodes -c %s" % host
-        os.system(cmd)
-    lock.acquire()
-    nodes[host]['torque_state'] = 'free'
-    nodes[host]['openstack_state'] = 'exiting'
-    print "enable_host available_count =", available_count
-    lock.release()
-    # give worker node 10 seconds to update resource usage
-    t = threading.Timer(10, args=[host])
-    t.start()
+    # Does NOT return node to batch scheduler instantly
+    #
+    # 1. give NOVA compute node 10 seconds to update its resource
+    #    status to db
+    #
+    # 2. if next ondemand request is waiting for node in 10 second,
+    #    allow it to leapfrog to this node
+    #
+    # 3. batch jobs cannot use this node within these 10 seconds
+    try:
+        host = kwargs.get("host")
+        print "enable_host", host
+        nodes[host]['openstack_state'] = 'exiting'
+        t = threading.Timer(10, clear_exiting_flag, args=[host])
+        t.start()
+    except Exception as e:
+        print e
 
-def disable_host(**kwargs):
-    host = kwargs.get("host")
-    if host is not None:
+def disable_host(host):
+    try:
         print "Disabling host %s" % host
         cmd = "sudo pbsnodes -o %s" % host
         os.system(cmd)
-    nodes[host]['torque_state'] = 'offline'
-    nodes[host]['openstack_state'] = 'available'
+    except Exception as e:
+        print e
 
 def unlock_hosts(**kwargs):
-    global available_count
     try:
         for host in kwargs.get("hosts"):
             if nodes[host]['openstack_state'] == 'locked':
@@ -157,9 +167,7 @@ def execute():
         abort(400)
     if "args" in data:
         args = data['args']
-    if command == 'disable_host':
-        disable_host(**args)
-    elif command == 'enable_host':
+    if command == 'enable_host':
         enable_host(**args)
     elif command == 'unlock_hosts':
         unlock_hosts(**args)
@@ -167,12 +175,13 @@ def execute():
 
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
+    global available_count, leapfrog_count, request_id
     count = int(count)
     if count <= 0:
         return jsonify({'nodes': {}})
 
-    global available_count, request_id
     new_nodes = {}
+    leapfrog_nodes = {}
 
     lock.acquire()
     _request_id = request_id
@@ -187,22 +196,36 @@ def request_nodes(count):
         lock.acquire()
         if not newEvent.is_set():
             # W timeout
-            request_queue.get()
+            try:
+                assert request_queue.get() is newEvent
+            except Exception as e:
+                print "ERROR uNicOrn", e # TODO fix this
             lock.release()
             print datetime.utcnow(), _request_id, "request_nodes W TIMEOUT available_count =", available_count
             return jsonify({'nodes': new_nodes})
         else:
-            print datetime.utcnow(), _request_id, "request_nodes W SUCCESS available_count =", available_count
+            print datetime.utcnow(), _request_id, \
+                    "request_nodes W SUCCESS available_count = {}, leapfrog_count = {}".format(
+                    available_count, leapfrog_count)
+            if leapfrog_count > 0:
+                for node in nodes:
+                    if nodes[node]['openstack_state'] == 'leapfrog':
+                        nodes[node]['openstack_state'] = 'locked'
+                        leapfrog_nodes[node] = nodes[node]
+                        if len(leapfrog_nodes) == count:
+                            break
+                leapfrog_count -= len(leapfrog_nodes)
+                print datetime.utcnow(), _request_id, "request_nodes remaining leapfrog_count = ", leapfrog_count
 
-    if available_count > 0:
+    if available_count > 0 and len(leapfrog_nodes) < count:
         for node in nodes:
             if nodes[node]['torque_state'] == 'free':
-                if nodes[node]['openstack_state'] in ['lock', 'exiting']:
+                if nodes[node]['openstack_state'] == 'locked':
                     continue
                 nodes[node]['torque_state'] = 'offline'
-                nodes[node]['openstack_state'] = 'lock'
+                nodes[node]['openstack_state'] = 'locked'
                 new_nodes[node] = nodes[node]
-                if len(new_nodes) == count:
+                if len(new_nodes) == count - len(leapfrog_nodes):
                     break
         # TODO what about len(new_nodes) < count
         available_count -= len(new_nodes)
@@ -211,13 +234,17 @@ def request_nodes(count):
 
     # Disable host in Torque
     for node in new_nodes:
-        kwargs = {'host': node}
-        disable_host(**kwargs)
-    if len(new_nodes) == count:
-        print datetime.utcnow(), _request_id, "request_nodes SUCCESS"
+        disable_host(node)
+    result = {}
+    for node in new_nodes:
+        result[node] = new_nodes[node]
+    for node in leapfrog_nodes:
+        result[node] = leapfrog_nodes[node]
+    if len(result) == count:
+        print datetime.utcnow(), _request_id, "request_nodes SUCCESS", new_nodes, leapfrog_nodes
     else:
-        print datetime.utcnow(), _request_id, "request_nodes REJECT"
-    return jsonify({'nodes': new_nodes})
+        print datetime.utcnow(), _request_id, "request_nodes REJECT / partially success", new_nodes, leapfrog_nodes
+    return jsonify({'nodes': result})
 
 @app.route('/nodes', methods=['GET'])
 def get_nodes():
@@ -258,8 +285,7 @@ def prologue():
     for node in job['node_list']:
         nodes[node]['torque_state'] = 'job-exclusive'
         taken_node += 1
-        if nodes[node]['openstack_state'] != 'exiting':
-            available_count -= 1
+    available_count -= taken_node
     print "prologue took", taken_node, "available_count =", available_count
     lock.release()
 
@@ -269,6 +295,7 @@ def prologue():
 
 @app.route('/jobs/epilogue', methods=['POST'])
 def epilogue():
+    global available_count
     if not request.json:
         abort(400)
     job = request.get_json()
@@ -283,20 +310,14 @@ def epilogue():
         existing_job.update(job)
         jobs[job_id] = existing_job
 
-    global available_count
     released_node = 0
-    nonexiting_avail_node = 0
+    lock.acquire()
     for node in job['node_list']:
         if nodes[node]['torque_state'] == 'job-exclusive':
             nodes[node]['torque_state'] = 'free'
             released_node += 1
-            if nodes[node]['openstack_state'] != 'exiting':
-                nonexiting_avail_node += 1
-    print "RELEASE", released_node
-
-    lock.acquire()
-    available_count += nonexiting_avail_node
-    print "epilogue available_count =", available_count
+    available_count += released_node
+    print "epilogue released_node =", released_node, "available_count =", available_count
     while released_node > 0:
         if not request_queue.empty():
             request_queue.get().set()
