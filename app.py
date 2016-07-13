@@ -119,6 +119,18 @@ def disable_host(**kwargs):
     nodes[host]['torque_state'] = 'offline'
     nodes[host]['openstack_state'] = 'available'
 
+def unlock_hosts(**kwargs):
+    global available_count
+    try:
+        for host in kwargs.get("hosts"):
+            if nodes[host]['openstack_state'] == 'locked':
+                nodes[host]['openstack_state'] = 'available'
+            else:
+                print "ERROR unlock_host nodes[{}]['openstack_state'] = {}".format(
+                        host, nodes[host]['openstack_state'])
+    except Exception as e:
+        print str(e)
+
 @app.route('/execute', methods=['POST'])
 def execute():
     print "request.data = %s" % request.data
@@ -135,8 +147,9 @@ def execute():
         disable_host(**args)
     elif command == 'enable_host':
         enable_host(**args)
+    elif command == 'unlock_hosts':
+        unlock_hosts(**args)
     return jsonify(data)
-
 
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
@@ -170,8 +183,10 @@ def request_nodes(count):
     if available_count > 0:
         for node in nodes:
             if nodes[node]['torque_state'] == 'free':
+                if nodes[node]['openstack_state'] == 'lock':
+                    continue
                 nodes[node]['torque_state'] = 'offline'
-                nodes[node]['openstack_state'] = 'available'
+                nodes[node]['openstack_state'] = 'lock'
                 new_nodes[node] = nodes[node]
                 if len(new_nodes) == count:
                     break
