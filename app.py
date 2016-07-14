@@ -148,6 +148,7 @@ def unlock_hosts(**kwargs):
     try:
         for host in kwargs.get("hosts"):
             if nodes[host]['openstack_state'] == 'locked':
+                print "Unlock", host
                 nodes[host]['openstack_state'] = 'available'
             else:
                 print "ERROR unlock_host nodes[{}]['openstack_state'] = {}".format(
