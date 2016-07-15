@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 from datetime import datetime
-import json
 import os
 
 from flask import abort, Flask, jsonify, request
@@ -38,6 +37,18 @@ jobs = {
 }
 
 
+@app.route('/nodes/reset/<node>', methods=['POST'])
+def reset_node(node):
+    if not request.json:
+        abort(400)
+    data = request.get_json()
+    node = Node.query.filter_by(hostname=node).first()
+    node.openstack_state = data.get('openstack_state', 'unavailable')
+    node.torque_state = data.get('torque_state', 'free')
+    db.session.commit()
+    return jsonify(node.to_dict())
+
+
 def enable_host(**kwargs):
     host = kwargs.get("host")
     if host is not None:
@@ -45,8 +56,8 @@ def enable_host(**kwargs):
         cmd = "sudo pbsnodes -c %s" % host
         os.system(cmd)
     node = Node.query.filter_by(hostname=host).first()
-    node.torque_state = 'free'
     node.openstack_state = 'unavailable'
+    node.torque_state = 'free'
     db.session.commit()
 
 
@@ -57,8 +68,8 @@ def disable_host(**kwargs):
         cmd = "sudo pbsnodes -o %s" % host
         os.system(cmd)
     node = Node.query.filter_by(hostname=host).first()
-    node.torque_state = 'offline'
     node.openstack_state = 'available'
+    node.torque_state = 'offline'
     db.session.commit()
 
 
