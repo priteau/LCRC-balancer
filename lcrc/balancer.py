@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from datetime import datetime
 import os
 
@@ -213,5 +211,6 @@ def end_job(job_id):
     jobs[job_id]['end_time'] = datetime.utcnow()
     return jsonify(jobs[job_id])
 
-if __name__ == '__main__':
+
+def main():
     app.run(host='0.0.0.0', port=1234, debug=True)

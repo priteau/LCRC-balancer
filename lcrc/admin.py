@@ -1,7 +1,4 @@
-#!/usr/bin/env python
-
 import argparse
-import json
 
 import requests
 
@@ -13,6 +10,7 @@ def node_list(opts):
     r = requests.get(url)
     print r.text
     return r.json()
+
 
 def reset_node(opts):
     data = {'command': 'reset'}
@@ -51,6 +49,3 @@ def main():
         node_list(opts)
     elif opts.command == 'reset_node':
         reset_node(opts)
-
-if __name__ == "__main__":
-    main()
