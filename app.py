@@ -11,7 +11,7 @@ import sys
 
 from flask import abort, Flask, jsonify, request
 
-if sys.argc < 4:
+if len(sys.argv) < 4:
     sys.exit("Usage: {} <number of nodes> <W> <R>")
 
 app = Flask(__name__)
@@ -35,6 +35,13 @@ for i in range(1, int(sys.argv[1])+1):
         'openstack_state': 'unavailable',
         'torque_state': 'free' }
 available_count = len(nodes)
+
+if R:
+    for i in range(1, R+1):
+        nodes['lcrc-worker-{}'.format(i)] = {
+            'openstack_state': 'unavailable',
+            'torque_state': 'free' }
+
 leapfrog_count = 0
 
 def clear_exiting_flag(host):
