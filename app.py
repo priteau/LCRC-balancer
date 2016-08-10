@@ -7,8 +7,12 @@ import time
 from threading import Lock
 import Queue
 import threading
+import sys
 
 from flask import abort, Flask, jsonify, request
+
+if sys.argc < 4:
+    sys.exit("Usage: {} <number of nodes> <W> <R>")
 
 app = Flask(__name__)
 
@@ -20,75 +24,16 @@ ON_DEMAND_RESERVE_SIZE = 1
 jobs = {
 }
 
+W = int(sys.argv[2])
+R = 0
 request_id = 1
 lock = Lock()
 request_queue = Queue.Queue()
-nodes = {
-    'lcrc-worker-1': {
+nodes = {}
+for i in range(1, int(sys.argv[1])+1):
+    nodes['lcrc-worker-{}'.format(i)] = {
         'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-2': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-3': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-4': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-5': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-6': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-7': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-8': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-9': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-10': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-11': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-12': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-13': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-14': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-15': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    },
-    'lcrc-worker-16': {
-        'openstack_state': 'unavailable',
-        'torque_state': 'free'
-    }
-}
+        'torque_state': 'free' }
 available_count = len(nodes)
 leapfrog_count = 0
 
@@ -176,6 +121,8 @@ def execute():
 
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
+    if W == 0:
+        return request_nodes_zeroW(count)
     global available_count, leapfrog_count, request_id
     count = int(count)
     if count <= 0:
@@ -188,12 +135,12 @@ def request_nodes(count):
     _request_id = request_id
     request_id += 1
     print datetime.utcnow(), _request_id, "request_nodes starting available_count =", available_count
-    if not request_queue.empty() or available_count == 0:
+    if W > 0 and not request_queue.empty() or available_count == 0:
         print datetime.utcnow(), "QUEUE request", _request_id
         newEvent = threading.Event()
         request_queue.put(newEvent)
         lock.release()
-        newEvent.wait(timeout=30) # TODO W live configurable
+        newEvent.wait(timeout=W) # TODO W live configurable
         lock.acquire()
         if not newEvent.is_set():
             # W timeout
