@@ -11,6 +11,14 @@ import sys
 
 from flask import abort, Flask, jsonify, request
 
+def disable_host(host):
+    try:
+        print "Disabling host %s" % host
+        cmd = "sudo pbsnodes -o %s" % host
+        os.system(cmd)
+    except Exception as e:
+        print e
+
 if len(sys.argv) < 4:
     sys.exit("Usage: {} <number of nodes> <W> <R>")
 
@@ -24,23 +32,32 @@ ON_DEMAND_RESERVE_SIZE = 1
 jobs = {
 }
 
+C = int(sys.argv[1])
 W = int(sys.argv[2])
-R = 0
+R = int(sys.argv[3])
 request_id = 1
 lock = Lock()
 request_queue = Queue.Queue()
 nodes = {}
-for i in range(1, int(sys.argv[1])+1):
+for i in range(1, C-R+1):
     nodes['lcrc-worker-{}'.format(i)] = {
         'openstack_state': 'unavailable',
         'torque_state': 'free' }
-available_count = len(nodes)
+# available_count indicates how many nodes are 'free' and can be 'appropriated' from batch scheduler
+available_count = C - R
 
-if R:
-    for i in range(1, R+1):
-        nodes['lcrc-worker-{}'.format(i)] = {
-            'openstack_state': 'unavailable',
-            'torque_state': 'free' }
+# reserve high numbered nodes
+reserved_nodes = []
+for i in range(C-R+1, C+1):
+    node = 'lcrc-worker-{}'.format(i)
+    disable_host(node)
+    nodes[node] = {
+        'openstack_state': 'available',
+        'torque_state': 'offline' }
+    reserved_nodes.append(node)
+
+def is_node_reserved(node):
+    return node in reserved_nodes
 
 leapfrog_count = 0
 
@@ -51,7 +68,12 @@ def clear_exiting_flag(host):
             lock.acquire()
             if request_queue.empty():
                 lock.release()
-                print "Enabling host %s" % host
+                # Never enable reserved node
+                if is_node_reserved(host):
+                    nodes[host]['openstack_state'] = 'available'
+                    print "clear_exiting_flag, reserved node {}".format(host)
+                    return
+                print datetime.utcnow(), "Enabling host %s" % host
                 cmd = "sudo pbsnodes -c %s" % host
                 os.system(cmd)
                 lock.acquire()
@@ -61,9 +83,12 @@ def clear_exiting_flag(host):
                 print "clear_exiting_flag no waiting request, available_count =", available_count
                 lock.release()
             else:
+                # It is possible to leapfrog a reserved node.
+                # The reason for doing this is to wake up a
+                # queued request.
                 nodes[host]['openstack_state'] = 'leapfrog'
                 leapfrog_count += 1
-                print "clear_exiting_flag leapfrog, leapfrog_count =", leapfrog_count
+                print "clear_exiting_flag leapfrog", host, "leapfrog_count =", leapfrog_count
                 request_queue.get().set()
                 lock.release()
     except Exception as e:
@@ -81,18 +106,10 @@ def enable_host(**kwargs):
     # 3. batch jobs cannot use this node within these 10 seconds
     try:
         host = kwargs.get("host")
-        print "enable_host", host
+        print datetime.utcnow(), "enable_host", host
         nodes[host]['openstack_state'] = 'exiting'
         t = threading.Timer(10, clear_exiting_flag, args=[host])
         t.start()
-    except Exception as e:
-        print e
-
-def disable_host(host):
-    try:
-        print "Disabling host %s" % host
-        cmd = "sudo pbsnodes -o %s" % host
-        os.system(cmd)
     except Exception as e:
         print e
 
@@ -103,6 +120,9 @@ def unlock_hosts(**kwargs):
                 print "Unlock", host
                 nodes[host]['openstack_state'] = 'available'
             else:
+                # Reserved hosts, if they were not being scheduled
+                # by calling request_nodes(), they won't be locked.
+                # So I did not exclude them from this checking.
                 print "ERROR unlock_host nodes[{}]['openstack_state'] = {}".format(
                         host, nodes[host]['openstack_state'])
     except Exception as e:
@@ -128,8 +148,8 @@ def execute():
 
 @app.route('/nodes/request/<count>', methods=['POST'])
 def request_nodes(count):
-    if W == 0:
-        return request_nodes_zeroW(count)
+    # When request_nodes() is invoked, it means all openstack nodes,
+    # including reserved nodes are busy.
     global available_count, leapfrog_count, request_id
     count = int(count)
     if count <= 0:
@@ -142,12 +162,12 @@ def request_nodes(count):
     _request_id = request_id
     request_id += 1
     print datetime.utcnow(), _request_id, "request_nodes starting available_count =", available_count
-    if W > 0 and not request_queue.empty() or available_count == 0:
+    if W > 0 and (not request_queue.empty() or available_count == 0):
         print datetime.utcnow(), "QUEUE request", _request_id
         newEvent = threading.Event()
         request_queue.put(newEvent)
         lock.release()
-        newEvent.wait(timeout=W) # TODO W live configurable
+        newEvent.wait(timeout=W)
         lock.acquire()
         if not newEvent.is_set():
             # W timeout
