@@ -59,6 +59,9 @@ for i in range(C-R+1, C+1):
 def is_node_reserved(node):
     return node in reserved_nodes
 
+def current_reserve_size():
+    return len(reserved_nodes)
+
 leapfrog_count = 0
 
 def clear_exiting_flag(host):
@@ -68,9 +71,11 @@ def clear_exiting_flag(host):
             lock.acquire()
             if request_queue.empty():
                 lock.release()
-                # Never enable reserved node
-                if is_node_reserved(host):
+
+                # Replenish the reserve if needed
+                if current_reserve_size < R:
                     nodes[host]['openstack_state'] = 'available'
+                    reserved_nodes.append(node)
                     print "clear_exiting_flag, reserved node {}".format(host)
                     return
                 print datetime.utcnow(), "Enabling host %s" % host
@@ -207,8 +212,24 @@ def request_nodes(count):
     print datetime.utcnow(), _request_id, "request_nodes remaining available_count = ", available_count
     lock.release()
 
+    # Replenish the reserve if needed
+    new_reserved_nodes = []
+    if current_reserve_size < R:
+        required_nodes_for_reserve = R - current_reserve_size
+        for node in nodes:
+            if required_nodes_for_reserve > 0:
+                if nodes[node]['torque_state'] == 'free':
+                    if nodes[node]['openstack_state'] == 'locked':
+                        continue
+                    nodes[node]['torque_state'] = 'offline'
+                    nodes[node]['openstack_state'] = 'locked'
+                    new_reserved_nodes.append(node)
+                    required_nodes_for_reserve -= 1
+
     # Disable host in Torque
     for node in new_nodes:
+        disable_host(node)
+    for node in new_reserved_nodes:
         disable_host(node)
     result = {}
     for node in new_nodes:
@@ -291,6 +312,17 @@ def epilogue():
         if nodes[node]['torque_state'] == 'job-exclusive':
             nodes[node]['torque_state'] = 'free'
             released_node += 1
+
+    # Replenish the reserve if needed
+    if current_reserve_size < R:
+        for i in range(R - current_reserve_size):
+            node = job['node_list'][i]
+            nodes[node]['openstack_state'] = 'available'
+            nodes[node]['torque_state'] = 'offline'
+            reserved_nodes.append(node)
+            released_node -= 1
+            print "epilogue returned node {} to reserve".format(node)
+
     available_count += released_node
     print "epilogue released_node =", released_node, "available_count =", available_count
     while released_node > 0:
